@@ -5,6 +5,18 @@ import {Test} from "forge-std/Test.sol";
 import {MerkleWhitelistNFT} from "../src/MerkleWhitelistNFT.sol";
 import {Hashes} from "@openzeppelin/contracts/utils/cryptography/Hashes.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+
+/// @dev Allowlisted contract that calls `mint` but rejects the NFT in `onERC721Received`.
+contract RejectingMintHelper {
+    function mint(MerkleWhitelistNFT nft, bytes32[] calldata proof) external {
+        nft.mint(proof);
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return bytes4(0xdeadbeef);
+    }
+}
 
 contract MerkleWhitelistNFTTest is Test {
     MerkleWhitelistNFT internal nft;
@@ -85,6 +97,79 @@ contract MerkleWhitelistNFTTest is Test {
         assertEq(nft.ownerOf(1), alice);
         assertEq(nft.ownerOf(2), bob);
         assertEq(nft.totalMinted(), 2);
+    }
+
+    function testImmutablesAndMetadata() public view {
+        assertEq(nft.merkleRoot(), root);
+        assertEq(nft.maxSupply(), 100);
+        assertEq(nft.name(), "Merkle WL");
+        assertEq(nft.symbol(), "MWL");
+    }
+
+    function testTotalMintedAndHasMintedInitially() public view {
+        assertEq(nft.totalMinted(), 0);
+        assertFalse(nft.hasMinted(alice));
+    }
+
+    function testFourAllowlistedMintersSequentialIds() public {
+        vm.prank(alice);
+        nft.mint(_proofForIndex(0));
+        vm.prank(bob);
+        nft.mint(_proofForIndex(1));
+        vm.prank(carol);
+        nft.mint(_proofForIndex(2));
+        vm.prank(dave);
+        nft.mint(_proofForIndex(3));
+
+        assertEq(nft.totalMinted(), 4);
+        assertEq(nft.ownerOf(1), alice);
+        assertEq(nft.ownerOf(2), bob);
+        assertEq(nft.ownerOf(3), carol);
+        assertEq(nft.ownerOf(4), dave);
+    }
+
+    function testSoldOutReverts() public {
+        MerkleWhitelistNFT small = new MerkleWhitelistNFT("S", "S", root, 2);
+
+        vm.prank(alice);
+        small.mint(_proofForIndex(0));
+        vm.prank(bob);
+        small.mint(_proofForIndex(1));
+
+        vm.prank(carol);
+        vm.expectRevert(MerkleWhitelistNFT.SoldOut.selector);
+        small.mint(_proofForIndex(2));
+    }
+
+    function testSoldOutCheckedBeforeProofEvenWithValidProof() public {
+        MerkleWhitelistNFT one = new MerkleWhitelistNFT("O", "O", root, 1);
+
+        vm.prank(alice);
+        one.mint(_proofForIndex(0));
+
+        vm.prank(bob);
+        vm.expectRevert(MerkleWhitelistNFT.SoldOut.selector);
+        one.mint(_proofForIndex(1));
+    }
+
+    function testMaxSupplyZeroAlwaysSoldOut() public {
+        MerkleWhitelistNFT dead = new MerkleWhitelistNFT("D", "D", root, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(MerkleWhitelistNFT.SoldOut.selector);
+        dead.mint(_proofForIndex(0));
+    }
+
+    function testMintRevertsWhenContractReceiverRejectsNFT() public {
+        RejectingMintHelper helper = new RejectingMintHelper();
+        bytes32[] memory layer = new bytes32[](1);
+        layer[0] = keccak256(abi.encodePacked(address(helper)));
+        bytes32 soloRoot = _buildRoot(layer);
+        MerkleWhitelistNFT soloNft = new MerkleWhitelistNFT("R", "R", soloRoot, 10);
+        bytes32[] memory emptyProof = new bytes32[](0);
+
+        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, address(helper)));
+        helper.mint(soloNft, emptyProof);
     }
 
     function _proofForIndex(uint256 leafIndex) internal view returns (bytes32[] memory proof) {
